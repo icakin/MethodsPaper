@@ -271,71 +271,111 @@ p_growth <- fit_T_plot(auto, "growth_C_fg_per_hr", expression(Growth~(fg~C~h^{-1
 p_resp   <- fit_T_plot(auto, "resp_C_fg_per_hr",   expression(Respiration~(fg~C~h^{-1})), TRUE)
 p_cue    <- fit_T_plot(auto, "carbon_use_efficiency", "Carbon Use Efficiency", TRUE)
 
-# 11.7 Extract parameters & T_opt
+# 11.7 Extract parameters & T_opt, now with 95% Wald CIs on E
 extract_params <- function(fit, name, var, Topt) {
-  if(is.null(fit) || inherits(fit,"try-error")) return(NULL)
-  cf <- coef(fit)
+  if (inherits(fit, "try-error") || is.null(fit)) return(NULL)
+  
+  # summary gives Std. Errors
+  s  <- summary(fit)
+  cf <- coef(s)
+  
+  # point estimate and SE for E
+  E_est <- cf["E", "Estimate"]
+  E_se  <- cf["E", "Std. Error"]
+  E_lo  <- E_est - 1.96 * E_se
+  E_hi  <- E_est + 1.96 * E_se
+  
+  # helper to safely pull a coef or NA
+  get_co <- function(nm) {
+    if (nm %in% rownames(cf)) cf[nm, "Estimate"] else NA_real_
+  }
+  
   tibble(
-    Trait=var, Model=name, AIC=AIC(fit), lnR0=cf["lnR0"] %||% NA,
-    E=cf["E"] %||% NA, El=cf["El"] %||% NA, Tl=cf["Tl"] %||% NA,
-    Eh=cf["Eh"] %||% NA, Th=cf["Th"] %||% NA,
-    A=cf["A"] %||% NA, B=cf["B"] %||% NA, T_opt=Topt
+    Trait       = var,
+    Model       = name,
+    AIC         = AIC(fit),
+    lnR0        = get_co("lnR0"),
+    E           = E_est,
+    E_CI_lower  = E_lo,
+    E_CI_upper  = E_hi,
+    El          = get_co("El"),
+    Tl          = get_co("Tl"),
+    Eh          = get_co("Eh"),
+    Th          = get_co("Th"),
+    A           = get_co("A"),
+    B           = get_co("B"),
+    T_opt       = Topt
   )
 }
+
 params_list <- list()
-for(var in c("growth_C_fg_per_hr","resp_C_fg_per_hr","carbon_use_efficiency")) {
-  df <- auto %>% filter(is.finite(.data[[var]]), .data[[var]]>0)
-  if(nrow(df)<4) next
-  Tmin <- min(df$Temperature); Tmax <- max(df$Temperature)
+for (var in c("growth_C_fg_per_hr", "resp_C_fg_per_hr", "carbon_use_efficiency")) {
+  df <- auto %>% filter(is.finite(.data[[var]]), .data[[var]] > 0)
+  if (nrow(df) < 4) next
+  
+  Tmin      <- min(df$Temperature)
+  Tmax      <- max(df$Temperature)
   Topt_data <- df$Temperature[which.max(df[[var]])]
-  grid1000 <- tibble(Temperature=seq(Tmin,Tmax,length.out=1000))
-  if(var=="carbon_use_efficiency") {
+  grid1000  <- tibble(Temperature = seq(Tmin, Tmax, length.out = 1000))
+  
+  if (var == "carbon_use_efficiency") {
     fit <- try(nlsLM(
-      carbon_use_efficiency ~ arrh_mod_CUE2(Temperature,A,E,B),
-      data=df, start=list(A=min(df[[var]])-max(df[[var]]), E=0.6, B=min(df[[var]])),
-      lower=c(A=-Inf,E=0.01,B=0), upper=c(A=0,E=10,B=1),
-      control=nls.lm.control(maxiter=500)
-    ), silent=TRUE)
-    pred <- predict_safe(fit, grid1000)
+      carbon_use_efficiency ~ arrh_mod_CUE2(Temperature, A, E, B),
+      data = df,
+      start = list(A = min(df[[var]]) - max(df[[var]]), E = 0.6, B = min(df[[var]])),
+      lower = c(A = -Inf, E = 0.01, B = 0),
+      upper = c(A = 0,    E = 10,   B = 1),
+      control = nls.lm.control(maxiter = 500)
+    ), silent = TRUE)
+    
+    pred     <- predict_safe(fit, grid1000)
     Topt_fit <- grid1000$Temperature[which.max(pred)]
     params_list[[var]] <- extract_params(fit, "Arrhenius+CUE", var, Topt_fit)
+    
   } else {
     fits <- list(
       two = try(nlsLM(
-        formula=paste0("log(",var,") ~ ln_SS_two(Temperature, lnR0, E, El, Tl, Eh, Th)"),
-        data=df, start=list(lnR0=log(max(df[[var]])),E=0.6,El=0.4,Tl=Tmin+2,Eh=1.5,Th=Topt_data+3),
-        lower=c(-Inf,0.1,0.1,0,0.1,0), upper=c(Inf,2.5,2.5,60,5,60), control=nls.lm.control(maxiter=500)
-      ), silent=TRUE),
+        formula = paste0("log(", var, ") ~ ln_SS_two(Temperature, lnR0, E, El, Tl, Eh, Th)"),
+        data    = df,
+        start   = list(lnR0 = log(max(df[[var]])), E = 0.6, El = 0.4, Tl = Tmin + 2, Eh = 1.5, Th = Topt_data + 3),
+        lower   = c(-Inf, 0.1, 0.1, 0,   0.1, 0),
+        upper   = c( Inf, 2.5, 2.5, 60, 5,   60),
+        control = nls.lm.control(maxiter = 500)
+      ), silent = TRUE),
+      
       one = try(nlsLM(
-        formula=paste0("log(",var,") ~ ln_SS_one(Temperature, lnR0, E, Eh, Th)"),
-        data=df, start=list(lnR0=log(max(df[[var]])),E=0.6,Eh=if(var=="growth_C_fg_per_hr")3 else 1.5,Th=if(var=="growth_C_fg_per_hr")Topt_data+2 else Topt_data+5),
-        lower=c(-Inf,0.1,0.5,0), upper=c(Inf,2.5,6,60), control=nls.lm.control(maxiter=500)
-      ), silent=TRUE),
+        formula = paste0("log(", var, ") ~ ln_SS_one(Temperature, lnR0, E, Eh, Th)"),
+        data    = df,
+        start   = list(
+          lnR0 = log(max(df[[var]])),
+          E    = 0.6,
+          Eh   = if (var == "growth_C_fg_per_hr") 3 else 1.5,
+          Th   = if (var == "growth_C_fg_per_hr") Topt_data + 2 else Topt_data + 5
+        ),
+        lower   = c(-Inf, 0.1, 0.5, 0),
+        upper   = c( Inf, 2.5,   6, 60),
+        control = nls.lm.control(maxiter = 500)
+      ), silent = TRUE),
+      
       bol = try(nlsLM(
-        formula=paste0("log(",var,") ~ ln_boltz(Temperature, lnR0, E)"),
-        data=df, start=list(lnR0=log(max(df[[var]])),E=0.6), lower=c(-Inf,0.1), upper=c(Inf,2.5), control=nls.lm.control(maxiter=400)
-      ), silent=TRUE)
+        formula = paste0("log(", var, ") ~ ln_boltz(Temperature, lnR0, E)"),
+        data    = df,
+        start   = list(lnR0 = log(max(df[[var]])), E = 0.6),
+        lower   = c(-Inf, 0.1),
+        upper   = c( Inf, 2.5),
+        control = nls.lm.control(maxiter = 400)
+      ), silent = TRUE)
     )
-    AICs <- map_dbl(fits, ~ if(inherits(.x,"try-error")) Inf else AIC(.x))
+    
+    AICs <- map_dbl(fits, ~ if (inherits(.x, "try-error")) Inf else AIC(.x))
     best <- names(which.min(AICs))
-    fit <- fits[[best]]
-    pred <- exp(predict_safe(fit, grid1000))
+    fit  <- fits[[best]]
+    
+    pred     <- safe_exp(predict_safe(fit, grid1000))
     Topt_fit <- grid1000$Temperature[which.max(pred)]
     params_list[[var]] <- extract_params(fit, best, var, Topt_fit)
   }
 }
+
 all_params <- bind_rows(params_list)
-write_csv(all_params, "thermal_fit_parameters_with_Topt.csv")
-
-# 11.8 Combine & export plots
-combo_plot <- wrap_plots(p_growth, p_resp, p_cue, ncol=3) +
-  plot_layout(guides="collect") +
-  plot_annotation(tag_levels="A", tag_prefix="(", tag_suffix=")") &
-  theme(plot.margin=margin(5,10,5,10))
-
-ggsave("SharpeSchoolfield_Temperature_Fits.pdf", combo_plot,
-       width=12, height=4, dpi=600)
-
-################################################################################
-#                                   End of Script                             #
-################################################################################
+write_csv(all_params, "thermal_fit_parameters_with_Topt_and_CIs.csv")
